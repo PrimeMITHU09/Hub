@@ -9,6 +9,7 @@ import random
 import string
 import urllib.parse
 from datetime import datetime
+import json
 import re
 
 # --- CONFIGURATIONS ---
@@ -38,6 +39,8 @@ def init_db():
                  (user_id INTEGER PRIMARY KEY, username TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS settings 
                  (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS processed_messages 
+                 (id TEXT PRIMARY KEY)''')
     
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance', 'off')")
     
@@ -151,37 +154,63 @@ def handle_callback(call):
         data = user_states[user_id]
         bot.answer_callback_query(call.id, "Checking inbox...")
         
-        full_msg, otp_val, phone_val = fetch_full_inbox_message(data["email"], data["token"])
+        messages = fetch_all_inbox_messages(data["token"])
         
-        if full_msg:
-            bot.send_message(user_id, f"📥 **New Inbox Message Received!**\n\n{full_msg}", parse_mode="Markdown")
-            
-            ip_info = get_user_ip_info()
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            
-            phone_line = f"number : {phone_val}\n" if phone_val else "number : +880 1XXXXXXXXX\n"
-            
-            group_msg = (
-                f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
-                f"> connection : {data['service']}\n"
-                f"> country : {ip_info}\n"
-                f"{phone_line}"
-                f"> otp : {otp_val}\n"
-                f"> status : SUCCESS ✓\n"
-                f"> timestamp : {timestamp}\n\n"
-                f"{full_msg}\n"
-                f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n"
-                f"⚡ PRIMIUM SERVICE HUB ⏔"
-            )
-            bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
+        if messages:
+            bot.send_message(user_id, f"📥 **Inbox Messages Checked! Total Found:** `{len(messages)}`", parse_mode="Markdown")
             
             conn = get_db_connection()
             c = conn.cursor()
-            c.execute("INSERT INTO accounts (user, service, email, token) VALUES (?, ?, ?, ?)",
-                      (username, data['service'], data['email'], data['token']))
-            conn.commit()
+            
+            for msg_data in messages:
+                msg_id = msg_data.get("id")
+                c.execute("SELECT id FROM processed_messages WHERE id=?", (msg_id,))
+                if c.fetchone():
+                    continue
+                
+                c.execute("INSERT INTO processed_messages (id) VALUES (?)", (msg_id,))
+                conn.commit()
+
+                subject = msg_data.get("subject", "No Subject")
+                intro = msg_data.get("intro", "")
+                text_content = msg_data.get("text", "") or intro
+                full_msg = f"📌 **Subject:** {subject}\n\n{text_content}"
+                
+                otp_match = re.search(r'\b(?<![\d.])(\d{4,8})(?![\d.])\b', full_msg)
+                otp_val = otp_match.group(1) if otp_match else "Confirm with Mail"
+
+                phone_match = re.search(r'(\+880\s?1[3-9]\d{8}|01[3-9]\d{8})', full_msg)
+                phone_val = phone_match.group(0) if phone_match else None
+
+                ip_info = get_user_ip_info()
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                
+                number_line = f"> number : {phone_val}\n" if phone_val else ""
+                
+                group_msg = (
+                    f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
+                    f"> connection : {data['service']}\n"
+                    f"> country : {ip_info}\n"
+                    f"{number_line}"
+                    f"> otp : {otp_val}\n"
+                    f"> status : SUCCESS ✓\n"
+                    f"> timestamp : {timestamp}\n\n"
+                    f"{full_msg}\n"
+                    f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n"
+                    f"⚡ PRIMIUM SERVICE HUB ⏔"
+                )
+                bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
+                bot.send_message(user_id, f"📥 **New Message Forwarded to Group!**\n\n{full_msg}", parse_mode="Markdown")
+            
             conn.close()
-            del user_states[user_id]
+            c_chk = get_db_connection()
+            cur = c_chk.cursor()
+            cur.execute("SELECT id FROM accounts WHERE email=?", (data['email'],))
+            if not cur.fetchone():
+                cur.execute("INSERT INTO accounts (user, service, email, token) VALUES (?, ?, ?, ?)",
+                          (username, data['service'], data['email'], data['token']))
+                c_chk.commit()
+            c_chk.close()
         else:
             bot.send_message(user_id, "⏳ No new message received yet. Click again after getting mail from website.")
 
@@ -437,7 +466,6 @@ def handle_user_inputs(message):
         url = message.text
         raw_name = state["name"]
         
-        # Automatic Real Logo Name Formatting
         emoji, domain = get_logo_for_service(url)
         formatted_service_name = f"{emoji} {raw_name}"
         
@@ -492,25 +520,51 @@ def background_mail_monitor():
 
             for row in rows:
                 acc_id, username, service_name, email, token = row
-                full_msg, otp_val, phone_val = fetch_full_inbox_message(email, token)
-                if full_msg and "Processed" not in full_msg:
-                    ip_info = get_user_ip_info()
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    phone_line = f"number : {phone_val}\n" if phone_val else "number : +880 1XXXXXXXXX\n"
+                messages = fetch_all_inbox_messages(token)
+                
+                if messages:
+                    c_chk = get_db_connection()
+                    cur = c_chk.cursor()
+                    
+                    for msg_data in messages:
+                        msg_id = msg_data.get("id")
+                        cur.execute("SELECT id FROM processed_messages WHERE id=?", (msg_id,))
+                        if cur.fetchone():
+                            continue
+                        
+                        cur.execute("INSERT INTO processed_messages (id) VALUES (?)", (msg_id,))
+                        c_chk.commit()
 
-                    group_msg = (
-                        f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
-                        f"> connection : {service_name}\n"
-                        f"> country : {ip_info}\n"
-                        f"{phone_line}"
-                        f"> otp : {otp_val}\n"
-                        f"> status : SUCCESS ✓\n"
-                        f"> timestamp : {timestamp}\n\n"
-                        f"{full_msg}\n"
-                        f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n"
-                        f"⚡ PRIMIUM SERVICE HUB ⏔"
-                    )
-                    bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
+                        subject = msg_data.get("subject", "No Subject")
+                        intro = msg_data.get("intro", "")
+                        text_content = msg_data.get("text", "") or intro
+                        full_msg = f"📌 **Subject:** {subject}\n\n{text_content}"
+                        
+                        otp_match = re.search(r'\b(?<![\d.])(\d{4,8})(?![\d.])\b', full_msg)
+                        otp_val = otp_match.group(1) if otp_match else "Confirm with Mail"
+
+                        phone_match = re.search(r'(\+880\s?1[3-9]\d{8}|01[3-9]\d{8})', full_msg)
+                        phone_val = phone_match.group(0) if phone_match else None
+
+                        ip_info = get_user_ip_info()
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        
+                        number_line = f"> number : {phone_val}\n" if phone_val else ""
+
+                        group_msg = (
+                            f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
+                            f"> connection : {service_name}\n"
+                            f"> country : {ip_info}\n"
+                            f"{number_line}"
+                            f"> otp : {otp_val}\n"
+                            f"> status : SUCCESS ✓\n"
+                            f"> timestamp : {timestamp}\n\n"
+                            f"{full_msg}\n"
+                            f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n"
+                            f"⚡ PRIMIUM SERVICE HUB ⏔"
+                        )
+                        bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
+                    c_chk.close()
         except:
             pass
         import time
@@ -533,34 +587,22 @@ def generate_custom_temp_mail(password):
         pass
     return None, None
 
-def fetch_full_inbox_message(email, token):
+def fetch_all_inbox_messages(token):
     try:
         headers = {"Authorization": f"Bearer {token}"}
         res = requests.get("https://api.mail.tm/messages", headers=headers)
         messages = res.json().get("hydra:member", [])
+        detailed_messages = []
         if messages:
-            msg_id = messages[0]["id"]
-            msg_res = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers)
-            msg_data = msg_res.json()
-            
-            subject = msg_data.get("subject", "No Subject")
-            intro = msg_data.get("intro", "")
-            text_content = msg_data.get("text", "") or intro
-            
-            full_msg = f"📌 **Subject:** {subject}\n\n{text_content}"
-            
-            # Smart OTP Extraction from any mail body
-            otp_match = re.search(r'\b(?<![\d.])(\d{4,8})(?![\d.])\b', full_msg)
-            otp_val = otp_match.group(1) if otp_match else "Confirm with Mail"
-
-            # Extract Phone Number if provided in mail
-            phone_match = re.search(r'(\+880\s?1[3-9]\d{8}|01[3-9]\d{8})', full_msg)
-            phone_val = phone_match.group(0) if phone_match else None
-
-            return full_msg, otp_val, phone_val
+            for msg in messages:
+                msg_id = msg["id"]
+                msg_res = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers)
+                if msg_res.status_code == 200:
+                    detailed_messages.append(msg_res.json())
+            return detailed_messages
     except:
         pass
-    return None, None, None
+    return []
 
 def get_user_ip_info():
     try:
