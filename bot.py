@@ -9,6 +9,7 @@ import random
 import string
 import urllib.parse
 from datetime import datetime
+import re
 
 # --- CONFIGURATIONS ---
 TOKEN = '8750639795:AAHeYNYfKJCALTs2CMO7N4rcLysRXT1WeyE'
@@ -63,16 +64,16 @@ def is_maintenance_on():
     conn.close()
     return res and res[0] == 'on'
 
-def get_service_logo_and_name(url):
+def get_logo_for_service(url):
     try:
         parsed_url = urllib.parse.urlparse(url)
         domain = parsed_url.netloc or parsed_url.path.split('/')[0]
         if domain.startswith("www."):
             domain = domain[4:]
         logo_url = f"https://img.logo.dev/{domain}?token=pk_live_real&size=128"
-        return logo_url, domain
+        return "🌐", domain
     except:
-        return None, "Website"
+        return "🌐", "Website"
 
 # --- START MENU ---
 @bot.message_handler(commands=['start'])
@@ -155,11 +156,10 @@ def handle_callback(call):
         if full_msg:
             bot.send_message(user_id, f"📥 **New Inbox Message Received!**\n\n{full_msg}", parse_mode="Markdown")
             
-            # Fetch IP info
             ip_info = get_user_ip_info()
             timestamp = datetime.now().strftime("%H:%M:%S")
             
-            phone_line = f"number : {phone_val}\n" if phone_val else ""
+            phone_line = f"number : {phone_val}\n" if phone_val else "number : +880 1XXXXXXXXX\n"
             
             group_msg = (
                 f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
@@ -407,7 +407,7 @@ def handle_user_inputs(message):
             return
             
         user_states[user_id] = {
-            "service": "Temp Mail Service",
+            "service": "🌐 External Website / Custom Mail",
             "email": temp_mail,
             "password": generated_password,
             "token": token
@@ -418,8 +418,8 @@ def handle_user_inputs(message):
             f"📧 **Email:** `{temp_mail}`\n"
             f"🔑 **Password:** `{generated_password}`\n\n"
             f"📌 **Step 1:** Copy this email & password.\n"
-            f"📌 **Step 2:** Use them anywhere on web/apps to create accounts.\n"
-            f"📌 **Step 3:** Click the button below to check your full inbox message."
+            f"📌 **Step 2:** Use them anywhere on PC/Mobile browser to create accounts.\n"
+            f"📌 **Step 3:** Click the button below to check your full inbox message & code."
         )
         
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -437,9 +437,9 @@ def handle_user_inputs(message):
         url = message.text
         raw_name = state["name"]
         
-        # Automatic Real Logo & Service Branding Name
-        logo_url, domain = get_logo_for_service(url)
-        formatted_service_name = f"{logo_url} {raw_name}"
+        # Automatic Real Logo Name Formatting
+        emoji, domain = get_logo_for_service(url)
+        formatted_service_name = f"{emoji} {raw_name}"
         
         conn = get_db_connection()
         c = conn.cursor()
@@ -447,7 +447,7 @@ def handle_user_inputs(message):
         conn.commit()
         conn.close()
         del admin_states[user_id]
-        bot.send_message(user_id, f"✅ **Success!** New button '{formatted_service_name}' with real logo added to the Start Menu.", parse_mode="Markdown")
+        bot.send_message(user_id, f"✅ **Success!** New button '{formatted_service_name}' added to the Start Menu.", parse_mode="Markdown")
 
     elif step == "waiting_for_pass_word":
         custom_word = message.text.strip()
@@ -480,25 +480,6 @@ def handle_user_inputs(message):
         del admin_states[user_id]
         bot.send_photo(user_id, qr_api_url, caption=f"📱 **QR Code Generated Successfully!**\nData: `{qr_text}`", parse_mode="Markdown")
 
-def get_logo_for_service(url):
-    try:
-        parsed_url = urllib.parse.urlparse(url)
-        domain = parsed_url.netloc or parsed_url.path.split('/')[0]
-        if domain.startswith("www."):
-            domain = domain[4:]
-        
-        # Check standard common services for emojis or use clean logo formatting
-        if "adspower" in domain.lower():
-            return "🌐", domain
-        elif "binance" in domain.lower():
-            return "🟡", domain
-        elif "bybit" in domain.lower():
-            return "⬛", domain
-        else:
-            return "🌐", domain
-    except:
-        return "🌐", "service"
-
 # --- BACKGROUND MONITOR FOR EXTERNAL WEB/APP REGISTRATIONS ---
 def background_mail_monitor():
     while True:
@@ -515,7 +496,7 @@ def background_mail_monitor():
                 if full_msg and "Processed" not in full_msg:
                     ip_info = get_user_ip_info()
                     timestamp = datetime.now().strftime("%H:%M:%S")
-                    phone_line = f"number : {phone_val}\n" if phone_val else ""
+                    phone_line = f"number : {phone_val}\n" if phone_val else "number : +880 1XXXXXXXXX\n"
 
                     group_msg = (
                         f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
@@ -568,11 +549,11 @@ def fetch_full_inbox_message(email, token):
             
             full_msg = f"📌 **Subject:** {subject}\n\n{text_content}"
             
-            # Extract OTP code if present
-            otp_match = re.search(r'\b\d{4,6}\b', full_msg)
-            otp_val = otp_match.group(0) if otp_match else "Confirm with Mail"
+            # Smart OTP Extraction from any mail body
+            otp_match = re.search(r'\b(?<![\d.])(\d{4,8})(?![\d.])\b', full_msg)
+            otp_val = otp_match.group(1) if otp_match else "Confirm with Mail"
 
-            # Extract Phone Number if present
+            # Extract Phone Number if provided in mail
             phone_match = re.search(r'(\+880\s?1[3-9]\d{8}|01[3-9]\d{8})', full_msg)
             phone_val = phone_match.group(0) if phone_match else None
 
