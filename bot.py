@@ -1,6 +1,8 @@
+import os
 import telebot
 from telebot import types
 import requests
+from flask import Flask
 
 # --- CONFIGURATIONS ---
 TOKEN = '8750639795:AAHeYNYfKJCALTs2CMO7N4rcLysRXT1WeyE'
@@ -8,6 +10,11 @@ ADMIN_ID = 1262396547
 GROUP_ID = -1004491146716
 
 bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
 
 user_states = {}
 accounts_db = []
@@ -116,5 +123,10 @@ def mask_email(email):
     return f"{parts[0][:2]}****@{parts[1]}"
 
 if __name__ == "__main__":
-    print("Bot is running...")
-    bot.infinity_polling()
+    import threading
+    # Run Telegram bot in a separate thread
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    
+    # Run Flask app to satisfy Render Web Service port requirement
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
