@@ -9,7 +9,6 @@ import random
 import string
 import urllib.parse
 from datetime import datetime
-import json
 import re
 
 # --- CONFIGURATIONS ---
@@ -73,7 +72,6 @@ def get_logo_for_service(url):
         domain = parsed_url.netloc or parsed_url.path.split('/')[0]
         if domain.startswith("www."):
             domain = domain[4:]
-        logo_url = f"https://img.logo.dev/{domain}?token=pk_live_real&size=128"
         return "🌐", domain
     except:
         return "🌐", "Website"
@@ -157,13 +155,14 @@ def handle_callback(call):
         messages = fetch_all_inbox_messages(data["token"])
         
         if messages:
-            bot.send_message(user_id, f"📥 **Inbox Messages Checked! Total Found:** `{len(messages)}`", parse_mode="Markdown")
-            
             conn = get_db_connection()
             c = conn.cursor()
             
+            forwarded_count = 0
             for msg_data in messages:
                 msg_id = msg_data.get("id")
+                
+                # Check if already processed for this specific session/message
                 c.execute("SELECT id FROM processed_messages WHERE id=?", (msg_id,))
                 if c.fetchone():
                     continue
@@ -186,7 +185,7 @@ def handle_callback(call):
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 
                 number_line = f"> number : {phone_val}\n" if phone_val else ""
-                
+
                 group_msg = (
                     f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
                     f"> connection : {data['service']}\n"
@@ -200,9 +199,15 @@ def handle_callback(call):
                     f"⚡ PRIMIUM SERVICE HUB ⏔"
                 )
                 bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
-                bot.send_message(user_id, f"📥 **New Message Forwarded to Group!**\n\n{full_msg}", parse_mode="Markdown")
+                bot.send_message(user_id, f"📥 **New Message Forwarded!**\n\n{full_msg}", parse_mode="Markdown")
+                forwarded_count += 1
             
             conn.close()
+            
+            if forwarded_count == 0:
+                bot.send_message(user_id, "📥 **Inbox Checked:** All received messages have already been forwarded. Send a new mail from website if needed.")
+            
+            # Save account if not saved
             c_chk = get_db_connection()
             cur = c_chk.cursor()
             cur.execute("SELECT id FROM accounts WHERE email=?", (data['email'],))
@@ -212,7 +217,7 @@ def handle_callback(call):
                 c_chk.commit()
             c_chk.close()
         else:
-            bot.send_message(user_id, "⏳ No new message received yet. Click again after getting mail from website.")
+            bot.send_message(user_id, "⏳ No message found in inbox yet. Complete registration on website and click again.")
 
     # --- TOOLS MENU ---
     elif call.data == "tools_menu":
@@ -591,9 +596,9 @@ def fetch_all_inbox_messages(token):
     try:
         headers = {"Authorization": f"Bearer {token}"}
         res = requests.get("https://api.mail.tm/messages", headers=headers)
-        messages = res.json().get("hydra:member", [])
-        detailed_messages = []
-        if messages:
+        if res.status_code == 200:
+            messages = res.json().get("hydra:member", [])
+            detailed_messages = []
             for msg in messages:
                 msg_id = msg["id"]
                 msg_res = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers)
