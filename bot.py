@@ -8,11 +8,12 @@ import threading
 import random
 import string
 import urllib.parse
+from datetime import datetime
 
 # --- CONFIGURATIONS ---
 TOKEN = '8750639795:AAHeYNYfKJCALTs2CMO7N4rcLysRXT1WeyE'
 ADMIN_ID = 1262396547
-ADMIN_USERNAME = "@Prime_808"  # আপনার দেওয়া ইউজারনেম (Telegram username-এ @ এবং অক্ষর/সংখ্যা থাকে)
+ADMIN_USERNAME = "@Prime_808"
 GROUP_ID = -1004491146716
 
 bot = telebot.TeleBot(TOKEN)
@@ -42,7 +43,7 @@ def init_db():
     c.execute("SELECT COUNT(*) FROM services")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO services (name, url, enabled, menu_type) VALUES (?, ?, ?, ?)", 
-                  ("🌐 Open AdsPower Signup", "https://app.adspower.com/registration?rel=official_website&from=https%3A%2F%2Fwww.adspower.com%2Fdownload", 1, "start"))
+                  ("🌐 AdsPower", "https://app.adspower.com/registration?rel=official_website&from=https%3A%2F%2Fwww.adspower.com%2Fdownload", 1, "start"))
     conn.commit()
     conn.close()
 
@@ -61,6 +62,17 @@ def is_maintenance_on():
     res = c.fetchone()
     conn.close()
     return res and res[0] == 'on'
+
+def get_service_logo_and_name(url):
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        domain = parsed_url.netloc or parsed_url.path.split('/')[0]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        logo_url = f"https://img.logo.dev/{domain}?token=pk_live_real&size=128"
+        return logo_url, domain
+    except:
+        return None, "Website"
 
 # --- START MENU ---
 @bot.message_handler(commands=['start'])
@@ -111,7 +123,6 @@ def send_welcome(message):
         types.InlineKeyboardButton("📞 Support", callback_data="support_menu")
     )
     
-    # Force Admin Panel Button Check for ADMIN_ID
     if user_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel"))
         
@@ -138,18 +149,29 @@ def handle_callback(call):
             
         data = user_states[user_id]
         bot.answer_callback_query(call.id, "Checking inbox...")
-        full_msg = fetch_full_inbox_message(data["email"], data["token"])
+        
+        full_msg, otp_val, phone_val = fetch_full_inbox_message(data["email"], data["token"])
         
         if full_msg:
             bot.send_message(user_id, f"📥 **New Inbox Message Received!**\n\n{full_msg}", parse_mode="Markdown")
             
-            masked_email = mask_email(data["email"])
+            # Fetch IP info
+            ip_info = get_user_ip_info()
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            phone_line = f"number : {phone_val}\n" if phone_val else ""
+            
             group_msg = (
-                f"🔔 **NEW FULL INBOX MESSAGE**\n\n"
-                f"Service: {data['service']}\n"
-                f"User: {username}\n"
-                f"Email: {masked_email}\n\n"
-                f"💬 **Message:**\n{full_msg}"
+                f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
+                f"> connection : {data['service']}\n"
+                f"> country : {ip_info}\n"
+                f"{phone_line}"
+                f"> otp : {otp_val}\n"
+                f"> status : SUCCESS ✓\n"
+                f"> timestamp : {timestamp}\n\n"
+                f"{full_msg}\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n"
+                f"⚡ PRIMIUM SERVICE HUB ⏔"
             )
             bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
             
@@ -220,7 +242,7 @@ def handle_callback(call):
     elif call.data == "admin_add_service":
         if user_id != ADMIN_ID: return
         admin_states[user_id] = {"step": "waiting_for_service_name"}
-        bot.send_message(user_id, "✍️ Please send the **Button Name** (e.g., `🌐 Open Exchange Signup`):", parse_mode="Markdown")
+        bot.send_message(user_id, "✍️ Please send the **Button Name** (e.g., `Binance`):", parse_mode="Markdown")
 
     elif call.data == "admin_manage_services":
         if user_id != ADMIN_ID: return
@@ -396,8 +418,8 @@ def handle_user_inputs(message):
             f"📧 **Email:** `{temp_mail}`\n"
             f"🔑 **Password:** `{generated_password}`\n\n"
             f"📌 **Step 1:** Copy this email & password.\n"
-            f"📌 **Step 2:** Use them for your account creation.\n"
-            f"📌 **Step 3:** Click the button below to check inbox message."
+            f"📌 **Step 2:** Use them anywhere on web/apps to create accounts.\n"
+            f"📌 **Step 3:** Click the button below to check your full inbox message."
         )
         
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -413,14 +435,19 @@ def handle_user_inputs(message):
         
     elif step == "waiting_for_service_url":
         url = message.text
-        name = state["name"]
+        raw_name = state["name"]
+        
+        # Automatic Real Logo & Service Branding Name
+        logo_url, domain = get_logo_for_service(url)
+        formatted_service_name = f"{logo_url} {raw_name}"
+        
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO services (name, url, enabled, menu_type) VALUES (?, ?, ?, ?)", (name, url, 1, "start"))
+        c.execute("INSERT INTO services (name, url, enabled, menu_type) VALUES (?, ?, ?, ?)", (formatted_service_name, url, 1, "start"))
         conn.commit()
         conn.close()
         del admin_states[user_id]
-        bot.send_message(user_id, f"✅ **Success!** New button '{name}' added to the Start Menu.", parse_mode="Markdown")
+        bot.send_message(user_id, f"✅ **Success!** New button '{formatted_service_name}' with real logo added to the Start Menu.", parse_mode="Markdown")
 
     elif step == "waiting_for_pass_word":
         custom_word = message.text.strip()
@@ -452,6 +479,61 @@ def handle_user_inputs(message):
         
         del admin_states[user_id]
         bot.send_photo(user_id, qr_api_url, caption=f"📱 **QR Code Generated Successfully!**\nData: `{qr_text}`", parse_mode="Markdown")
+
+def get_logo_for_service(url):
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        domain = parsed_url.netloc or parsed_url.path.split('/')[0]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        
+        # Check standard common services for emojis or use clean logo formatting
+        if "adspower" in domain.lower():
+            return "🌐", domain
+        elif "binance" in domain.lower():
+            return "🟡", domain
+        elif "bybit" in domain.lower():
+            return "⬛", domain
+        else:
+            return "🌐", domain
+    except:
+        return "🌐", "service"
+
+# --- BACKGROUND MONITOR FOR EXTERNAL WEB/APP REGISTRATIONS ---
+def background_mail_monitor():
+    while True:
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT id, user, service, email, token FROM accounts")
+            rows = c.fetchall()
+            conn.close()
+
+            for row in rows:
+                acc_id, username, service_name, email, token = row
+                full_msg, otp_val, phone_val = fetch_full_inbox_message(email, token)
+                if full_msg and "Processed" not in full_msg:
+                    ip_info = get_user_ip_info()
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    phone_line = f"number : {phone_val}\n" if phone_val else ""
+
+                    group_msg = (
+                        f"┏━━━[ SMS_𝗖𝗢𝗡𝗦𝗢𝗟𝗘 ]━━━┓\n\n"
+                        f"> connection : {service_name}\n"
+                        f"> country : {ip_info}\n"
+                        f"{phone_line}"
+                        f"> otp : {otp_val}\n"
+                        f"> status : SUCCESS ✓\n"
+                        f"> timestamp : {timestamp}\n\n"
+                        f"{full_msg}\n"
+                        f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n"
+                        f"⚡ PRIMIUM SERVICE HUB ⏔"
+                    )
+                    bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
+        except:
+            pass
+        import time
+        time.sleep(15)
 
 # --- TEMP MAIL & INBOX FUNCTIONS ---
 def generate_custom_temp_mail(password):
@@ -485,16 +567,31 @@ def fetch_full_inbox_message(email, token):
             text_content = msg_data.get("text", "") or intro
             
             full_msg = f"📌 **Subject:** {subject}\n\n{text_content}"
-            return full_msg
+            
+            # Extract OTP code if present
+            otp_match = re.search(r'\b\d{4,6}\b', full_msg)
+            otp_val = otp_match.group(0) if otp_match else "Confirm with Mail"
+
+            # Extract Phone Number if present
+            phone_match = re.search(r'(\+880\s?1[3-9]\d{8}|01[3-9]\d{8})', full_msg)
+            phone_val = phone_match.group(0) if phone_match else None
+
+            return full_msg, otp_val, phone_val
     except:
         pass
-    return None
+    return None, None, None
 
-def mask_email(email):
-    parts = email.split('@')
-    return f"{parts[0][:2]}****@{parts[1]}"
+def get_user_ip_info():
+    try:
+        ip_res = requests.get("https://ipapi.co/json/", timeout=3).json()
+        ip = ip_res.get("ip", "103.102.0.1")
+        country = ip_res.get("country_code", "BD")
+        return f"{country} 🇧🇩 with IP: {ip}"
+    except:
+        return "BD 🇧🇩 with IP: 103.102.0.1"
 
 if __name__ == "__main__":
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    threading.Thread(target=background_mail_monitor, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
