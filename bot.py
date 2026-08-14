@@ -18,27 +18,45 @@ def home():
 
 user_states = {}
 accounts_db = []
+services = {
+    "adspower": {
+        "name": "AdsPower Account",
+        "url": "https://app.adspower.com/registration?rel=official_website&from=https%3A%2F%2Fwww.adspower.com%2Fdownload",
+        "enabled": True
+    }
+}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("Get AdsPower Account", callback_data="get_adspower"))
     
+    # Dynamic service button with Web App (Popup view inside Telegram)
+    for s_key, s_data in services.items():
+        if s_data["enabled"]:
+            web_app = types.WebAppInfo(url=s_data["url"])
+            markup.add(types.InlineKeyboardButton(f"Get {s_data['name']}", web_app=web_app))
+            
+    # Admin panel button (Only visible/accessible for admin)
     if message.from_user.id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel"))
         
     bot.send_message(
         message.chat.id, 
-        "Welcome! Choose a service below to create your account automatically:", 
+        "Welcome! Click below to open the registration page directly inside Telegram, then generate your temp mail:", 
         reply_markup=markup
     )
+    
+    # Also send an option to generate temp mail easily
+    mail_markup = types.InlineKeyboardMarkup()
+    mail_markup.add(types.InlineKeyboardButton("📧 Generate Temp Mail & Credentials", callback_data="get_temp_mail"))
+    bot.send_message(message.chat.id, "👇 Click here to get your Temp Mail & Password for registration:", reply_markup=mail_markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     user_id = call.from_user.id
     username = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
     
-    if call.data == "get_adspower":
+    if call.data == "get_temp_mail":
         bot.answer_callback_query(call.id, "Generating Temp Mail...")
         
         temp_mail, temp_pass = generate_temp_mail()
@@ -51,21 +69,19 @@ def handle_callback(call):
         user_states[user_id] = {
             "service": "AdsPower Account",
             "email": temp_mail,
-            "password": generated_password,
-            "url": "https://app.adspower.com/registration?rel=official_website&from=https%3A%2F%2Fwww.adspower.com%2Fdownload"
+            "password": generated_password
         }
         
         text = (
-            f"✅ **Temp Mail Generated!**\n\n"
+            f"✅ **Temp Mail & Credentials Generated!**\n\n"
             f"📧 **Email:** `{temp_mail}`\n"
             f"🔑 **Password:** `{generated_password}`\n\n"
-            f"📌 **Step 1:** Open the link and signup.\n"
-            f"📌 **Step 2:** Solve CAPTCHA and click 'Get verification code'.\n"
-            f"📌 **Step 3:** Click the button below."
+            f"📌 **Step 1:** Copy this email & password.\n"
+            f"📌 **Step 2:** Paste them into the registration popup.\n"
+            f"📌 **Step 3:** Solve CAPTCHA, click 'Get verification code', and click the button below."
         )
         
         markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(types.InlineKeyboardButton("🌐 Open Signup Page", url=user_states[user_id]["url"]))
         markup.add(types.InlineKeyboardButton("🔄 Check Verification Code", callback_data="check_code"))
         
         bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
@@ -103,6 +119,36 @@ def handle_callback(call):
         else:
             bot.send_message(user_id, "⏳ No verification code received yet.")
 
+    elif call.data == "admin_panel":
+        if user_id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "⚠️ You are not authorized to access the Admin Panel!", show_alert=True)
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📋 View Accounts", callback_data="admin_accounts"),
+            types.InlineKeyboardButton("🔙 Back", callback_data="back_start")
+        )
+        bot.edit_message_text("⚙️ **Admin Control Panel**\nWelcome Admin! Manage your settings here.", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif call.data == "admin_accounts":
+        if user_id != ADMIN_ID:
+            return
+        acc_text = "📋 **Recent Created Accounts:**\n\n"
+        if not accounts_db:
+            acc_text += "No accounts created yet."
+        else:
+            for acc in accounts_db[-10:]:
+                acc_text += f"👤 {acc['user']} | 🛠 {acc['service']} | 📧 {acc['email']}\n"
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel"))
+        bot.edit_message_text(acc_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif call.data == "back_start":
+        # Reset or back to start logic
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+
 def generate_temp_mail():
     try:
         domains_res = requests.get("https://api.mail.tm/domains")
@@ -124,9 +170,6 @@ def mask_email(email):
 
 if __name__ == "__main__":
     import threading
-    # Run Telegram bot in a separate thread
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
-    
-    # Run Flask app to satisfy Render Web Service port requirement
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
