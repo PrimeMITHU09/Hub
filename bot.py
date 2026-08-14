@@ -5,10 +5,8 @@ from telebot import types
 import requests
 from flask import Flask
 import threading
-import re
 import random
 import string
-import base64
 import urllib.parse
 
 # --- CONFIGURATIONS ---
@@ -27,21 +25,30 @@ def home():
 def init_db():
     conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
-    # Services table for dynamic buttons/links
+    # Services table for dynamic buttons/links and their status
     c.execute('''CREATE TABLE IF NOT EXISTS services 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, url TEXT, enabled INTEGER)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, url TEXT, enabled INTEGER, menu_type TEXT DEFAULT 'start')''')
     # Accounts table for persistent mail tokens & records
     c.execute('''CREATE TABLE IF NOT EXISTS accounts 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, service TEXT, email TEXT, token TEXT)''')
     # Short links table
     c.execute('''CREATE TABLE IF NOT EXISTS short_links 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT, original_url TEXT)''')
+    # Users table for tracking and broadcast
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id INTEGER PRIMARY KEY, username TEXT)''')
+    # Bot settings (e.g. Maintenance Mode)
+    c.execute('''CREATE TABLE IF NOT EXISTS settings 
+                 (key TEXT PRIMARY KEY, value TEXT)''')
+    
+    # Default settings
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance', 'off')")
     
     # Insert default AdsPower service if table is empty
     c.execute("SELECT COUNT(*) FROM services")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO services (name, url, enabled) VALUES (?, ?, ?)", 
-                  ("🌐 Open AdsPower Signup", "https://app.adspower.com/registration?rel=official_website&from=https%3A%2F%2Fwww.adspower.com%2Fdownload", 1))
+        c.execute("INSERT INTO services (name, url, enabled, menu_type) VALUES (?, ?, ?, ?)", 
+                  ("🌐 Open AdsPower Signup", "https://app.adspower.com/registration?rel=official_website&from=https%3A%2F%2Fwww.adspower.com%2Fdownload", 1, "start"))
     conn.commit()
     conn.close()
 
@@ -53,15 +60,54 @@ user_states = {}
 def get_db_connection():
     return sqlite3.connect('bot_data.db', check_same_thread=False)
 
+def is_maintenance_on():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key='maintenance'")
+    res = c.fetchone()
+    conn.close()
+    return res and res[0] == 'on'
+
 # --- START MENU ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    
-    # Load dynamic services from DB
+    user_id = message.from_user.id
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+
+    # Save user to DB for stats/broadcast
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id, name, url FROM services WHERE enabled=1")
+    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
+    conn.commit()
+    conn.close()
+
+    # Check Maintenance Mode for regular users
+    if is_maintenance_on() and user_id != ADMIN_ID:
+        bot.send_message(message.chat.id, "🛠 **Bot is under maintenance!**\nPlease try again later.", parse_mode="Markdown")
+        return
+
+    # Handle Short Link Redirection
+    text_args = message.text.split()
+    if len(text_args) > 1 and text_args[1].startswith("r_"):
+        code = text_args[1].split("_")[1]
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT original_url FROM short_links WHERE code=?", (code,))
+        res = c.fetchone()
+        conn.close()
+        if res:
+            original_url = res[0]
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🌐 Visit Link", url=original_url))
+            bot.send_message(message.chat.id, f"🔗 **Redirecting Link:**\nClick the button below to visit your destination:", reply_markup=markup, parse_mode="Markdown")
+            return
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    # Load dynamic services meant for start menu (Only Enabled ones)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, name, url FROM services WHERE enabled=1 AND menu_type='start'")
     services = c.fetchall()
     conn.close()
     
@@ -73,11 +119,11 @@ def send_welcome(message):
     markup.add(
         types.InlineKeyboardButton("📧 Email Service", callback_data="get_temp_mail"),
         types.InlineKeyboardButton("🛠 Tools", callback_data="tools_menu"),
-        types.InlineKeyboardButton("📞 Support", url="https://t.me/your_support_username")
+        types.InlineKeyboardButton("📞 Support", callback_data="support_menu")
     )
     
     # Admin Panel Button
-    if message.from_user.id == ADMIN_ID:
+    if user_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel"))
         
     bot.send_message(
@@ -93,32 +139,8 @@ def handle_callback(call):
     username = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
     
     if call.data == "get_temp_mail":
-        bot.answer_callback_query(call.id, "Generating Temp Mail...")
-        temp_mail, temp_pass, token = generate_temp_mail()
-        if not temp_mail:
-            bot.send_message(call.message.chat.id, "❌ Failed to generate temp mail. Try again later.")
-            return
-            
-        generated_password = "P@ssw0rd_12345"
-        user_states[user_id] = {
-            "service": "Temp Mail Service",
-            "email": temp_mail,
-            "password": generated_password,
-            "token": token
-        }
-        
-        text = (
-            f"✅ **Temp Mail & Credentials Generated!**\n\n"
-            f"📧 **Email:** `{temp_mail}`\n"
-            f"🔑 **Password:** `{generated_password}`\n\n"
-            f"📌 **Step 1:** Copy this email & password.\n"
-            f"📌 **Step 2:** Use them for your account creation.\n"
-            f"📌 **Step 3:** Click the button below to check verification code."
-        )
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(types.InlineKeyboardButton("🔄 Check Verification Code", callback_data="check_code"))
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+        admin_states[user_id] = {"step": "waiting_for_mail_custom_word"}
+        bot.send_message(user_id, "✍️ Enter a custom word for your Temp Mail password (e.g., `Mithu`), and it will create your mail with a strong custom password:", parse_mode="Markdown")
         
     elif call.data == "check_code":
         if user_id not in user_states:
@@ -127,18 +149,18 @@ def handle_callback(call):
             
         data = user_states[user_id]
         bot.answer_callback_query(call.id, "Checking inbox...")
-        code = fetch_verification_code(data["email"], data["token"])
+        full_msg = fetch_full_inbox_message(data["email"], data["token"])
         
-        if code:
-            bot.send_message(user_id, f"🔐 **Verification Code Found!**\n\nCode: `{code}`\n\n🎉 Process completed.", parse_mode="Markdown")
+        if full_msg:
+            bot.send_message(user_id, f"📥 **New Inbox Message Received!**\n\n{full_msg}", parse_mode="Markdown")
             
             masked_email = mask_email(data["email"])
             group_msg = (
-                f"🔔 **NEW VERIFICATION**\n\n"
+                f"🔔 **NEW FULL INBOX MESSAGE**\n\n"
                 f"Service: {data['service']}\n"
                 f"User: {username}\n"
-                f"Email: {masked_email}\n"
-                f"Code: `{code}`"
+                f"Email: {masked_email}\n\n"
+                f"💬 **Message:**\n{full_msg}"
             )
             bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
             
@@ -150,7 +172,7 @@ def handle_callback(call):
             conn.close()
             del user_states[user_id]
         else:
-            bot.send_message(user_id, "⏳ No verification code received yet. Click again after getting code from website.")
+            bot.send_message(user_id, "⏳ No new message received yet. Click again after getting mail from website.")
 
     # --- TOOLS MENU ---
     elif call.data == "tools_menu":
@@ -158,7 +180,7 @@ def handle_callback(call):
         markup.add(
             types.InlineKeyboardButton("🔑 Custom Password Generator", callback_data="tool_pass_gen"),
             types.InlineKeyboardButton("🔗 Smart Short Link", callback_data="tool_short_link"),
-            types.InlineKeyboardButton("🔠 Base64 Encoder/Decoder", callback_data="tool_base64"),
+            types.InlineKeyboardButton("📱 QR Code Generator", callback_data="tool_qr_gen"),
             types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_start_menu")
         )
         bot.edit_message_text("🛠 **Tools Menu:**\nSelect a tool below:", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
@@ -171,9 +193,20 @@ def handle_callback(call):
         admin_states[user_id] = {"step": "waiting_for_long_url"}
         bot.send_message(user_id, "🔗 Send the long URL that you want to shorten:", parse_mode="Markdown")
 
-    elif call.data == "tool_base64":
-        admin_states[user_id] = {"step": "waiting_for_base64_text"}
-        bot.send_message(user_id, "🔠 Send any text to encode/decode:", parse_mode="Markdown")
+    elif call.data == "tool_qr_gen":
+        admin_states[user_id] = {"step": "waiting_for_qr_text"}
+        bot.send_message(user_id, "📱 Send any text or link to generate its QR Code instantly:", parse_mode="Markdown")
+
+    elif call.data == "support_menu":
+        support_text = (
+            "📞 **Support Center**\n\n"
+            "👤 **Admin Username:** @your_support_username\n"
+            "💻 **Developer:** Mithu Chandra Barman\n\n"
+            "🚀 Proudly built and managed! Enjoy using the system and feel free to reach out if you need anything!"
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_start_menu"))
+        bot.edit_message_text(support_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
 
     # --- ADMIN PANEL ---
     elif call.data == "admin_panel":
@@ -181,37 +214,63 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "⚠️ You are not authorized!", show_alert=True)
             return
         
+        # Check maintenance status for toggle text
+        m_status = "🟢 Turn Maintenance OFF" if is_maintenance_on() else "🔴 Turn Maintenance ON"
+
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
-            types.InlineKeyboardButton("➕ Add New Service", callback_data="admin_add_service"),
-            types.InlineKeyboardButton("🗑 Remove Service", callback_data="admin_rem_service"),
+            types.InlineKeyboardButton("➕ Add Start Menu Button", callback_data="admin_add_service"),
+            types.InlineKeyboardButton("⚙️ Manage/Toggle Services", callback_data="admin_manage_services"),
+            types.InlineKeyboardButton("📢 Broadcast Message", callback_data="admin_broadcast"),
+            types.InlineKeyboardButton("📊 Bot Stats", callback_data="admin_stats"),
             types.InlineKeyboardButton("📋 View All Accounts", callback_data="admin_accounts"),
+            types.InlineKeyboardButton(m_status, callback_data="toggle_maintenance"),
             types.InlineKeyboardButton("🔙 Close", callback_data="back_start")
         )
-        bot.edit_message_text("⚙️ **Admin Control Panel**\nManage your bot configurations:", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        bot.edit_message_text("⚙️ **Admin Control Panel**\nManage your bot configurations & buttons:", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
 
     elif call.data == "admin_add_service":
         if user_id != ADMIN_ID: return
         admin_states[user_id] = {"step": "waiting_for_service_name"}
-        bot.send_message(user_id, "✍️ Please send the **Name** of the new service (e.g., `🌐 Open Bybit Signup`):", parse_mode="Markdown")
+        bot.send_message(user_id, "✍️ Please send the **Button Name** (e.g., `🌐 Open Exchange Signup`):", parse_mode="Markdown")
 
-    elif call.data == "admin_rem_service":
+    elif call.data == "admin_manage_services":
         if user_id != ADMIN_ID: return
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, name FROM services")
+        c.execute("SELECT id, name, enabled FROM services")
         services = c.fetchall()
         conn.close()
         
         if not services:
-            bot.answer_callback_query(call.id, "No services found to remove.")
+            bot.answer_callback_query(call.id, "No services found.")
             return
             
         markup = types.InlineKeyboardMarkup(row_width=1)
-        for s_id, s_name in services:
-            markup.add(types.InlineKeyboardButton(f"❌ Remove: {s_name}", callback_data=f"del_srv_{s_id}"))
+        for s_id, s_name, enabled in services:
+            status = "✅ ON" if enabled == 1 else "❌ OFF"
+            markup.add(
+                types.InlineKeyboardButton(f"{s_name} [{status}]", callback_data=f"toggle_srv_{s_id}"),
+                types.InlineKeyboardButton(f"🗑 Delete", callback_data=f"del_srv_{s_id}")
+            )
         markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel"))
-        bot.edit_message_text("🗑 **Select a service to remove:**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        bot.edit_message_text("⚙️ **Manage Start Menu Buttons:**\nClick to toggle Active/Off or Delete:", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif call.data.startswith("toggle_srv_"):
+        if user_id != ADMIN_ID: return
+        srv_id = call.data.split("_")[2]
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT enabled FROM services WHERE id=?", (srv_id,))
+        current = c.fetchone()[0]
+        new_status = 0 if current == 1 else 1
+        c.execute("UPDATE services SET enabled=? WHERE id=?", (new_status, srv_id))
+        conn.commit()
+        conn.close()
+        bot.answer_callback_query(call.id, f"Button status changed!")
+        # Refresh manager view
+        call.data = "admin_manage_services"
+        handle_callback(call)
 
     elif call.data.startswith("del_srv_"):
         if user_id != ADMIN_ID: return
@@ -221,8 +280,48 @@ def handle_callback(call):
         c.execute("DELETE FROM services WHERE id=?", (srv_id,))
         conn.commit()
         conn.close()
-        bot.answer_callback_query(call.id, "Service removed successfully!")
-        bot.edit_message_text("✅ Service deleted. Click /start to refresh.", call.message.chat.id, call.message.message_id)
+        bot.answer_callback_query(call.id, "Service/Button deleted successfully!")
+        call.data = "admin_manage_services"
+        handle_callback(call)
+
+    elif call.data == "admin_broadcast":
+        if user_id != ADMIN_ID: return
+        admin_states[user_id] = {"step": "waiting_for_broadcast_msg"}
+        bot.send_message(user_id, "📢 Send the message (text, announcement, or update) you want to broadcast to all users:", parse_mode="Markdown")
+
+    elif call.data == "admin_stats":
+        if user_id != ADMIN_ID: return
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM accounts")
+        total_accounts = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM services")
+        total_services = c.fetchone()[0]
+        conn.close()
+
+        stats_text = (
+            "📊 **Bot Statistics & Analytics:**\n\n"
+            f"👥 **Total Users:** `{total_users}`\n"
+            f"📧 **Total Generated Accounts:** `{total_accounts}`\n"
+            f"🌐 **Active Start Buttons:** `{total_services}`"
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel"))
+        bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif call.data == "toggle_maintenance":
+        if user_id != ADMIN_ID: return
+        conn = get_db_connection()
+        c = conn.cursor()
+        current_state = "off" if is_maintenance_on() else "on"
+        c.execute("REPLACE INTO settings (key, value) VALUES ('maintenance', ?)", (current_state,))
+        conn.commit()
+        conn.close()
+        bot.answer_callback_query(call.id, f"Maintenance mode is now {current_state.upper()}!")
+        call.data = "admin_panel"
+        handle_callback(call)
 
     elif call.data == "admin_accounts":
         if user_id != ADMIN_ID: return
@@ -254,33 +353,90 @@ def handle_callback(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except:
             pass
-        # Trigger start message view again
         fake_message = call.message
         send_welcome(fake_message)
 
-# --- DYNAMIC INPUT HANDLER (Tools & Admin) ---
+# --- DYNAMIC INPUT HANDLER (Tools, Mail, Broadcast & Admin) ---
 @bot.message_handler(func=lambda message: message.from_user.id in admin_states)
 def handle_user_inputs(message):
     user_id = message.from_user.id
     state = admin_states[user_id]
     step = state["step"]
     
-    # Admin Service Add steps
-    if step == "waiting_for_service_name":
+    # Broadcast Step
+    if step == "waiting_for_broadcast_msg":
+        broadcast_text = message.text
+        del admin_states[user_id]
+        
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users")
+        all_users = c.fetchall()
+        conn.close()
+        
+        bot.send_message(user_id, f"🚀 Broadcasting to {len(all_users)} users...")
+        success, failed = 0, 0
+        for (u_id,) in all_users:
+            try:
+                bot.send_message(u_id, f"📢 **Announcement:**\n\n{broadcast_text}", parse_mode="Markdown")
+                success += 1
+            except:
+                failed += 1
+                
+        bot.send_message(user_id, f"✅ **Broadcast Complete!**\nSuccess: {success}\nFailed: {failed}")
+
+    # Temp Mail Custom Password Generation Step
+    elif step == "waiting_for_mail_custom_word":
+        custom_word = message.text.strip()
+        rand_chars = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$", k=6))
+        generated_password = f"{custom_word}_{rand_chars}"
+        
+        bot.send_message(user_id, "🔄 Generating Temp Mail with your custom password...")
+        temp_mail, token = generate_custom_temp_mail(generated_password)
+        
+        if not temp_mail:
+            bot.send_message(user_id, "❌ Failed to generate temp mail. Try again later.")
+            del admin_states[user_id]
+            return
+            
+        user_states[user_id] = {
+            "service": "Temp Mail Service",
+            "email": temp_mail,
+            "password": generated_password,
+            "token": token
+        }
+        
+        text = (
+            f"✅ **Temp Mail & Custom Credentials Generated!**\n\n"
+            f"📧 **Email:** `{temp_mail}`\n"
+            f"🔑 **Password:** `{generated_password}`\n\n"
+            f"📌 **Step 1:** Copy this email & password.\n"
+            f"📌 **Step 2:** Use them for your account creation.\n"
+            f"📌 **Step 3:** Click the button below to check inbox message."
+        )
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🔄 Check Inbox Message", callback_data="check_code"))
+        
+        bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=markup)
+        del admin_states[user_id]
+
+    # Admin Service/Button Add steps
+    elif step == "waiting_for_service_name":
         state["name"] = message.text
         state["step"] = "waiting_for_service_url"
-        bot.send_message(user_id, "🔗 Now send the **Official Web App URL** for this service:", parse_mode="Markdown")
+        bot.send_message(user_id, "🔗 Now send the **Official Web App URL** for this button:", parse_mode="Markdown")
         
     elif step == "waiting_for_service_url":
         url = message.text
         name = state["name"]
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO services (name, url, enabled) VALUES (?, ?, ?)", (name, url, 1))
+        c.execute("INSERT INTO services (name, url, enabled, menu_type) VALUES (?, ?, ?, ?)", (name, url, 1, "start"))
         conn.commit()
         conn.close()
         del admin_states[user_id]
-        bot.send_message(user_id, f"✅ **Success!** New service '{name}' added to the Start Menu.", parse_mode="Markdown")
+        bot.send_message(user_id, f"✅ **Success!** New button '{name}' added to the Start Menu.", parse_mode="Markdown")
 
     # Tool: Password Generator
     elif step == "waiting_for_pass_word":
@@ -305,27 +461,35 @@ def handle_user_inputs(message):
         short_link = f"https://t.me/{bot_username}?start=r_{short_code}"
         
         del admin_states[user_id]
-        bot.send_message(user_id, f"🔗 **Smart Short Link Created:**\n`{short_link}`", parse_mode="Markdown")
+        bot.send_message(user_id, f"🔗 **Smart Short Link Created:**\n`{short_link}`\n\nVisiting this link will seamlessly redirect users to your original destination website!", parse_mode="Markdown")
 
-# --- TEMP MAIL & OTP FUNCTIONS ---
-def generate_temp_mail():
+    # Tool: QR Code Generator
+    elif step == "waiting_for_qr_text":
+        qr_text = message.text.strip()
+        encoded_text = urllib.parse.quote(qr_text)
+        qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_text}"
+        
+        del admin_states[user_id]
+        bot.send_photo(user_id, qr_api_url, caption=f"📱 **QR Code Generated Successfully!**\nData: `{qr_text}`", parse_mode="Markdown")
+
+# --- TEMP MAIL & INBOX FUNCTIONS ---
+def generate_custom_temp_mail(password):
     try:
         domains_res = requests.get("https://api.mail.tm/domains")
         domain = domains_res.json()["hydra:member"][0]["domain"]
         username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         email = f"{username}@{domain}"
-        password = "Password123!"
         
         create_res = requests.post("https://api.mail.tm/accounts", json={"address": email, "password": password})
         if create_res.status_code == 201:
             token_res = requests.post("https://api.mail.tm/token", json={"address": email, "password": password})
             token = token_res.json().get("token")
-            return email, password, token
+            return email, token
     except:
         pass
-    return None, None, None
+    return None, None
 
-def fetch_verification_code(email, token):
+def fetch_full_inbox_message(email, token):
     try:
         headers = {"Authorization": f"Bearer {token}"}
         res = requests.get("https://api.mail.tm/messages", headers=headers)
@@ -333,12 +497,14 @@ def fetch_verification_code(email, token):
         if messages:
             msg_id = messages[0]["id"]
             msg_res = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers)
-            content = msg_res.json().get("text", "") or msg_res.json().get("intro", "")
-            subject = msg_res.json().get("subject", "")
-            full_text = content + " " + subject
-            codes = re.findall(r'\b\d{4,6}\b', full_text)
-            if codes:
-                return codes[-1]
+            msg_data = msg_res.json()
+            
+            subject = msg_data.get("subject", "No Subject")
+            intro = msg_data.get("intro", "")
+            text_content = msg_data.get("text", "") or intro
+            
+            full_msg = f"📌 **Subject:** {subject}\n\n{text_content}"
+            return full_msg
     except:
         pass
     return None
