@@ -12,6 +12,7 @@ import urllib.parse
 # --- CONFIGURATIONS ---
 TOKEN = '8750639795:AAHeYNYfKJCALTs2CMO7N4rcLysRXT1WeyE'
 ADMIN_ID = 1262396547
+ADMIN_USERNAME = "@Prime_808"  # আপনার দেওয়া ইউজারনেম (Telegram username-এ @ এবং অক্ষর/সংখ্যা থাকে)
 GROUP_ID = -1004491146716
 
 bot = telebot.TeleBot(TOKEN)
@@ -25,26 +26,19 @@ def home():
 def init_db():
     conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
-    # Services table for dynamic buttons/links and their status
     c.execute('''CREATE TABLE IF NOT EXISTS services 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, url TEXT, enabled INTEGER, menu_type TEXT DEFAULT 'start')''')
-    # Accounts table for persistent mail tokens & records
     c.execute('''CREATE TABLE IF NOT EXISTS accounts 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, service TEXT, email TEXT, token TEXT)''')
-    # Short links table
     c.execute('''CREATE TABLE IF NOT EXISTS short_links 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT, original_url TEXT)''')
-    # Users table for tracking and broadcast
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id INTEGER PRIMARY KEY, username TEXT)''')
-    # Bot settings (e.g. Maintenance Mode)
     c.execute('''CREATE TABLE IF NOT EXISTS settings 
                  (key TEXT PRIMARY KEY, value TEXT)''')
     
-    # Default settings
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance', 'off')")
     
-    # Insert default AdsPower service if table is empty
     c.execute("SELECT COUNT(*) FROM services")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO services (name, url, enabled, menu_type) VALUES (?, ?, ?, ?)", 
@@ -74,19 +68,16 @@ def send_welcome(message):
     user_id = message.from_user.id
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
 
-    # Save user to DB for stats/broadcast
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
     conn.commit()
     conn.close()
 
-    # Check Maintenance Mode for regular users
     if is_maintenance_on() and user_id != ADMIN_ID:
         bot.send_message(message.chat.id, "🛠 **Bot is under maintenance!**\nPlease try again later.", parse_mode="Markdown")
         return
 
-    # Handle Short Link Redirection
     text_args = message.text.split()
     if len(text_args) > 1 and text_args[1].startswith("r_"):
         code = text_args[1].split("_")[1]
@@ -104,7 +95,6 @@ def send_welcome(message):
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     
-    # Load dynamic services meant for start menu (Only Enabled ones)
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT id, name, url FROM services WHERE enabled=1 AND menu_type='start'")
@@ -115,14 +105,13 @@ def send_welcome(message):
         web_app = types.WebAppInfo(url=s_url)
         markup.add(types.InlineKeyboardButton(s_name, web_app=web_app))
         
-    # Required Static Buttons
     markup.add(
         types.InlineKeyboardButton("📧 Email Service", callback_data="get_temp_mail"),
         types.InlineKeyboardButton("🛠 Tools", callback_data="tools_menu"),
         types.InlineKeyboardButton("📞 Support", callback_data="support_menu")
     )
     
-    # Admin Panel Button
+    # Force Admin Panel Button Check for ADMIN_ID
     if user_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel"))
         
@@ -200,7 +189,7 @@ def handle_callback(call):
     elif call.data == "support_menu":
         support_text = (
             "📞 **Support Center**\n\n"
-            "👤 **Admin Username:** @your_support_username\n"
+            f"👤 **Admin Username:** {ADMIN_USERNAME}\n"
             "💻 **Developer:** Mithu Chandra Barman\n\n"
             "🚀 Proudly built and managed! Enjoy using the system and feel free to reach out if you need anything!"
         )
@@ -214,7 +203,6 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "⚠️ You are not authorized!", show_alert=True)
             return
         
-        # Check maintenance status for toggle text
         m_status = "🟢 Turn Maintenance OFF" if is_maintenance_on() else "🔴 Turn Maintenance ON"
 
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -268,7 +256,6 @@ def handle_callback(call):
         conn.commit()
         conn.close()
         bot.answer_callback_query(call.id, f"Button status changed!")
-        # Refresh manager view
         call.data = "admin_manage_services"
         handle_callback(call)
 
@@ -356,14 +343,13 @@ def handle_callback(call):
         fake_message = call.message
         send_welcome(fake_message)
 
-# --- DYNAMIC INPUT HANDLER (Tools, Mail, Broadcast & Admin) ---
+# --- DYNAMIC INPUT HANDLER ---
 @bot.message_handler(func=lambda message: message.from_user.id in admin_states)
 def handle_user_inputs(message):
     user_id = message.from_user.id
     state = admin_states[user_id]
     step = state["step"]
     
-    # Broadcast Step
     if step == "waiting_for_broadcast_msg":
         broadcast_text = message.text
         del admin_states[user_id]
@@ -385,7 +371,6 @@ def handle_user_inputs(message):
                 
         bot.send_message(user_id, f"✅ **Broadcast Complete!**\nSuccess: {success}\nFailed: {failed}")
 
-    # Temp Mail Custom Password Generation Step
     elif step == "waiting_for_mail_custom_word":
         custom_word = message.text.strip()
         rand_chars = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$", k=6))
@@ -421,7 +406,6 @@ def handle_user_inputs(message):
         bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=markup)
         del admin_states[user_id]
 
-    # Admin Service/Button Add steps
     elif step == "waiting_for_service_name":
         state["name"] = message.text
         state["step"] = "waiting_for_service_url"
@@ -438,7 +422,6 @@ def handle_user_inputs(message):
         del admin_states[user_id]
         bot.send_message(user_id, f"✅ **Success!** New button '{name}' added to the Start Menu.", parse_mode="Markdown")
 
-    # Tool: Password Generator
     elif step == "waiting_for_pass_word":
         custom_word = message.text.strip()
         rand_chars = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$", k=6))
@@ -446,7 +429,6 @@ def handle_user_inputs(message):
         del admin_states[user_id]
         bot.send_message(user_id, f"🔑 **Generated Strong Password:**\n`{final_password}`", parse_mode="Markdown")
 
-    # Tool: Smart Short Link
     elif step == "waiting_for_long_url":
         long_url = message.text.strip()
         short_code = ''.join(random.choices(string.ascii_letters + string.digits, k=5))
@@ -463,7 +445,6 @@ def handle_user_inputs(message):
         del admin_states[user_id]
         bot.send_message(user_id, f"🔗 **Smart Short Link Created:**\n`{short_link}`\n\nVisiting this link will seamlessly redirect users to your original destination website!", parse_mode="Markdown")
 
-    # Tool: QR Code Generator
     elif step == "waiting_for_qr_text":
         qr_text = message.text.strip()
         encoded_text = urllib.parse.quote(qr_text)
